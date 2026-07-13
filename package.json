@@ -1,0 +1,15 @@
+{
+  "name": "ashbis-bot",
+  "version": "1.0.0",
+  "description": "Bot de setup y gestion para el servidor de Discord de Ashbis",
+  "main": "bot.js",
+  "type": "commonjs",
+  "scripts": {
+    "setup": "node setup.js",
+    "start": "node bot.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.14.1",
+    "dotenv": "^16.4.5"
+  }
+}
