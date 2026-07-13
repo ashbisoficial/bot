@@ -2,6 +2,18 @@
 // Acá definís TODA la estructura del server. Editá esto sin tocar el resto del código.
 
 module.exports = {
+  // Moderación automática (sin IA): borra links de invitación externos y
+  // mensajes con estas palabras, y aplica timeout si un usuario acumula
+  // varias infracciones. Agregá/quitá palabras sin tocar bot.js.
+  moderation: {
+    bannedWords: [],
+    spam: { maxRepeats: 3, windowMs: 8000 }, // mismo mensaje repetido N veces en X ms
+    maxInfractions: 3, // infracciones antes de timeout
+    infractionWindowMs: 10 * 60 * 1000, // ventana para contar infracciones
+    timeoutMs: 10 * 60 * 1000, // duración del timeout
+    logChannel: 'logs',
+  },
+
   roles: [
     { name: 'Admin', color: 'Red', permissions: ['Administrator'], hoist: true, mentionable: false },
     { name: 'Moderador', color: 'Orange', permissions: ['ManageMessages', 'ModerateMembers', 'KickMembers'], hoist: true, mentionable: false },

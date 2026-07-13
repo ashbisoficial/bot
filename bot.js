@@ -18,8 +18,24 @@ const {
   ChannelType,
   PermissionFlagsBits,
 } = require('discord.js');
+const Anthropic = require('@anthropic-ai/sdk');
+const config = require('./serverConfig');
+const ASHBIS_SYSTEM_PROMPT = require('./ashbisContext');
 
-const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+  ],
+});
+
+const anthropic = process.env.ANTHROPIC_API_KEY
+  ? new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
+  : null;
+if (!anthropic) {
+  console.warn('⚠️ ANTHROPIC_API_KEY no está seteado: el asistente de preguntas queda desactivado.');
+}
 
 const BETA_TESTER_BUTTON_ID = 'toggle_beta_tester';
 
@@ -186,6 +202,136 @@ client.on('interactionCreate', async interaction => {
     await message.pin().catch(() => {});
 
     return interaction.reply({ content: `✅ Changelog publicado en <#${changelogChannel.id}>.`, ephemeral: true });
+  }
+});
+
+// ---------- Moderación automática (sin IA) ----------
+const INVITE_REGEX = /(discord\.gg\/|discord(?:app)?\.com\/invite\/)\S+/i;
+const lastMessageByUser = new Map(); // userId -> { content, count, timestamp }
+const infractionsByUser = new Map(); // userId -> { count, firstAt }
+
+function findViolation(message) {
+  const content = message.content;
+
+  if (INVITE_REGEX.test(content)) {
+    return 'link de invitación externo';
+  }
+
+  const lower = content.toLowerCase();
+  const bannedWord = config.moderation.bannedWords.find(w => lower.includes(w.toLowerCase()));
+  if (bannedWord) {
+    return 'palabra no permitida';
+  }
+
+  const { maxRepeats, windowMs } = config.moderation.spam;
+  const prev = lastMessageByUser.get(message.author.id);
+  const now = Date.now();
+  if (prev && prev.content === content && now - prev.timestamp < windowMs) {
+    prev.count += 1;
+    prev.timestamp = now;
+    if (prev.count >= maxRepeats) {
+      return 'spam (mensaje repetido)';
+    }
+  } else {
+    lastMessageByUser.set(message.author.id, { content, count: 1, timestamp: now });
+  }
+
+  return null;
+}
+
+async function logModeration(guild, member, reason, content) {
+  const channels = await guild.channels.fetch();
+  const logChannel = channels.find(c => c && c.name === config.moderation.logChannel && c.type === ChannelType.GuildText);
+  if (!logChannel) return;
+
+  const embed = new EmbedBuilder()
+    .setTitle('🛡️ Moderación automática')
+    .addFields(
+      { name: 'Usuario', value: `<@${member.id}>` },
+      { name: 'Motivo', value: reason },
+      { name: 'Mensaje', value: content.slice(0, 500) || '(vacío)' }
+    )
+    .setColor(0xed4245)
+    .setTimestamp();
+
+  await logChannel.send({ embeds: [embed] }).catch(() => {});
+}
+
+async function registerInfraction(member) {
+  const { maxInfractions, infractionWindowMs, timeoutMs } = config.moderation;
+  const now = Date.now();
+  const record = infractionsByUser.get(member.id);
+
+  if (record && now - record.firstAt < infractionWindowMs) {
+    record.count += 1;
+  } else {
+    infractionsByUser.set(member.id, { count: 1, firstAt: now });
+  }
+
+  const current = infractionsByUser.get(member.id);
+  if (current.count >= maxInfractions) {
+    infractionsByUser.delete(member.id);
+    await member.timeout(timeoutMs, 'Infracciones repetidas de moderación automática').catch(() => {});
+    return true;
+  }
+  return false;
+}
+
+async function moderateMessage(message) {
+  const reason = findViolation(message);
+  if (!reason) return false;
+
+  await message.delete().catch(() => {});
+
+  const warning = await message.channel.send({
+    content: `⚠️ <@${message.author.id}> tu mensaje fue borrado (${reason}).`,
+  }).catch(() => null);
+  if (warning) setTimeout(() => warning.delete().catch(() => {}), 8000);
+
+  const timedOut = await registerInfraction(message.member);
+  await logModeration(message.guild, message.member, reason + (timedOut ? ' — timeout aplicado' : ''), message.content);
+
+  return true;
+}
+
+// ---------- Asistente IA (menciones al bot) ----------
+async function handleAssistantMention(message) {
+  if (!anthropic) return;
+
+  const question = message.content.replace(/<@!?\d+>/g, '').trim();
+  if (!question) {
+    await message.reply('¡Hola! Preguntame algo sobre Ashbis 🐾');
+    return;
+  }
+
+  await message.channel.sendTyping().catch(() => {});
+
+  try {
+    const response = await anthropic.messages.create({
+      model: process.env.ANTHROPIC_MODEL || 'claude-opus-4-8',
+      max_tokens: 500,
+      system: ASHBIS_SYSTEM_PROMPT,
+      output_config: { effort: 'low' },
+      messages: [{ role: 'user', content: question }],
+    });
+
+    const text = response.content.find(b => b.type === 'text')?.text;
+    await message.reply(text || 'No tengo una respuesta clara para eso ahora mismo 🐾');
+  } catch (err) {
+    console.error('Error consultando al asistente:', err);
+    await message.reply('❌ Tuve un problema respondiendo. Probá de nuevo en un rato.');
+  }
+}
+
+// ---------- Mensajes ----------
+client.on('messageCreate', async message => {
+  if (message.author.bot || !message.guild) return;
+
+  const wasModerated = await moderateMessage(message);
+  if (wasModerated) return;
+
+  if (message.mentions.has(client.user)) {
+    await handleAssistantMention(message);
   }
 });
 
